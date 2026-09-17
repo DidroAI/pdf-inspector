@@ -1110,12 +1110,18 @@ fn extract_text_in_regions_bytes(
 /// Returns:
 ///     PagesExtractionResult with per-page markdown and classification data.
 #[pyfunction]
-#[pyo3(signature = (path, pages=None))]
+#[pyo3(signature = (path, pages=None, provenance=false))]
 fn extract_pages_markdown(
     path: &str,
     pages: Option<Vec<u32>>,
+    provenance: bool,
 ) -> PyResult<PyPagesExtractionResult> {
-    let result = crate::extract_pages_markdown(path, pages.as_deref()).map_err(to_py_err)?;
+    let result = if provenance {
+        crate::extract_pages_markdown_with_provenance(path, pages.as_deref())
+    } else {
+        crate::extract_pages_markdown(path, pages.as_deref())
+    }
+    .map_err(to_py_err)?;
     Ok(to_py_pages_result(result))
 }
 
@@ -1123,12 +1129,18 @@ fn extract_pages_markdown(
 ///
 /// See [`extract_pages_markdown`] for details.
 #[pyfunction]
-#[pyo3(signature = (data, pages=None))]
+#[pyo3(signature = (data, pages=None, provenance=false))]
 fn extract_pages_markdown_bytes(
     data: &[u8],
     pages: Option<Vec<u32>>,
+    provenance: bool,
 ) -> PyResult<PyPagesExtractionResult> {
-    let result = crate::extract_pages_markdown_mem(data, pages.as_deref()).map_err(to_py_err)?;
+    let result = if provenance {
+        crate::extract_pages_markdown_mem_with_provenance(data, pages.as_deref())
+    } else {
+        crate::extract_pages_markdown_mem(data, pages.as_deref())
+    }
+    .map_err(to_py_err)?;
     Ok(to_py_pages_result(result))
 }
 

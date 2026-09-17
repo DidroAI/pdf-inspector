@@ -35,6 +35,7 @@ impl Default for OcrFusionOptions {
             markdown: MarkdownOptions {
                 include_page_numbers: false,
                 strip_headers_footers: false,
+                emit_block_provenance: false,
                 ..MarkdownOptions::default()
             },
             render_dpi: DEFAULT_RENDER_DPI,

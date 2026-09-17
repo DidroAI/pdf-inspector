@@ -386,6 +386,7 @@ def extract_text_in_regions_bytes(
 def extract_pages_markdown(
     path: str,
     pages: Optional[list[int]] = None,
+    provenance: bool = False,
 ) -> PagesExtractionResult:
     """Extract formatted markdown for pages of a PDF, with layout classification.
 
@@ -404,6 +405,7 @@ def extract_pages_markdown(
 def extract_pages_markdown_bytes(
     data: bytes,
     pages: Optional[list[int]] = None,
+    provenance: bool = False,
 ) -> PagesExtractionResult:
     """Extract formatted markdown for pages of a PDF from bytes.
 

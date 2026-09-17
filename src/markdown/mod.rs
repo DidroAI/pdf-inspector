@@ -882,12 +882,15 @@ impl TableDetectionOutput {
                 self.markdown_by_page
                     .entry(page)
                     .or_default()
-                    .push(PositionedMarkdown::new(
-                        table.rows.first().copied().unwrap_or(0.0),
-                        table.columns.first().copied().unwrap_or(0.0),
-                        crate::tables::table_to_markdown(table),
-                        chart_order,
-                    ));
+                    .push(
+                        PositionedMarkdown::new(
+                            table.rows.first().copied().unwrap_or(0.0),
+                            table.columns.first().copied().unwrap_or(0.0),
+                            crate::tables::table_to_markdown(table),
+                            chart_order,
+                        )
+                        .with_runs(table_runs(table)),
+                    );
             }
             #[cfg(feature = "ocr")]
             TableOutputMode::CompleteTables => {
@@ -1291,6 +1294,17 @@ pub struct MarkdownOptions {
     pub include_page_numbers: bool,
     /// Strip repeated headers/footers that appear on many pages
     pub strip_headers_footers: bool,
+    /// Prefix each block with `<!--pdfi p=N l=x0,y0,x1,y1;...-->`, naming the
+    /// page it came from and the line boxes it occupies, in PDF points from the
+    /// bottom left of the visible page box.
+    ///
+    /// Off by default, because it changes the text: a caller comparing output
+    /// literally would see the comments. It exists for callers that need to
+    /// point back at the page — a citation that highlights the paragraph it
+    /// came from — and that cannot do so afterwards, because the Markdown is a
+    /// transformation of the page rather than a copy of it, and matching one
+    /// back to the other agrees in the wrong place often enough to matter.
+    pub emit_block_provenance: bool,
 }
 
 impl Default for MarkdownOptions {
@@ -1320,6 +1334,7 @@ impl Default for MarkdownOptions {
             include_links: true,
             include_page_numbers: false,
             strip_headers_footers: true,
+            emit_block_provenance: false,
         }
     }
 }
@@ -1378,6 +1393,38 @@ pub fn to_markdown(text: &str, options: MarkdownOptions) -> String {
     }
 
     output
+}
+
+/// One strip per row of a table, spanning its columns.
+///
+/// Highlighting a table as a single rectangle would say "somewhere in this
+/// grid"; a strip per row says which rows, which is the same promise the line
+/// strips make for prose. `rows` are y boundaries in descending order and
+/// `columns` are x boundaries, both already measured by the detector, so the
+/// strips are read off the table rather than inferred from its text.
+fn table_runs(table: &crate::tables::Table) -> Vec<[f32; 4]> {
+    let (Some(&left), Some(&right)) = (
+        table
+            .columns
+            .iter()
+            .min_by(|a, b| a.total_cmp(b)),
+        table
+            .columns
+            .iter()
+            .max_by(|a, b| a.total_cmp(b)),
+    ) else {
+        return Vec::new();
+    };
+    if right <= left || table.rows.len() < 2 {
+        return Vec::new();
+    }
+    let mut bounds: Vec<f32> = table.rows.clone();
+    bounds.sort_by(|a, b| a.total_cmp(b));
+    bounds
+        .windows(2)
+        .filter(|pair| pair[1] > pair[0])
+        .map(|pair| [left, pair[0], right, pair[1]])
+        .collect()
 }
 
 /// Applies the document-wide repeated header/footer classifier to grouped lines.

@@ -485,6 +485,26 @@ pub fn extract_pages_markdown_mem(
     .map(|extraction| extraction.result)
 }
 
+/// As [`extract_pages_markdown_mem`], with each block prefixed by the page and
+/// line boxes it came from. See [`MarkdownOptions::emit_block_provenance`].
+pub fn extract_pages_markdown_mem_with_provenance(
+    buffer: &[u8],
+    pages: Option<&[u32]>,
+) -> Result<PagesExtractionResult, PdfError> {
+    extract_pages_markdown_mem_impl(
+        buffer,
+        pages,
+        None,
+        &MarkdownOptions {
+            emit_block_provenance: true,
+            ..MarkdownOptions::default()
+        },
+        false,
+        false,
+    )
+    .map(|extraction| extraction.result)
+}
+
 #[cfg(all(feature = "ocr", not(target_arch = "wasm32")))]
 pub(crate) fn extract_pages_markdown_mem_for_ocr(
     buffer: &[u8],
@@ -899,6 +919,17 @@ pub fn extract_pages_markdown<P: AsRef<Path>>(
     validate_pdf_file(&path)?;
     let buffer = std::fs::read(path.as_ref())?;
     extract_pages_markdown_mem(&buffer, pages)
+}
+
+/// As [`extract_pages_markdown`], with each block prefixed by the page and line
+/// boxes it came from. See [`MarkdownOptions::emit_block_provenance`].
+pub fn extract_pages_markdown_with_provenance<P: AsRef<Path>>(
+    path: P,
+    pages: Option<&[u32]>,
+) -> Result<PagesExtractionResult, PdfError> {
+    validate_pdf_file(&path)?;
+    let buffer = std::fs::read(path.as_ref())?;
+    extract_pages_markdown_mem_with_provenance(&buffer, pages)
 }
 
 // =========================================================================

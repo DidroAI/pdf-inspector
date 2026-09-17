@@ -358,9 +358,28 @@ fn dehyphenate_line_breaks(text: &str) -> String {
 
 /// Remove isolated page-number expressions from Markdown.
 fn remove_page_numbers(text: &str) -> String {
-    let mut result = Vec::new();
-    let lines: Vec<&str> = text.lines().collect();
+    let raw: Vec<&str> = text.lines().collect();
+    // Provenance markers are transport, not content, and this pass must not be
+    // able to see that they are there: it decides by what sits either side of a
+    // folio, and a marker sitting there changes the decision. So they are lifted
+    // out, each remembered against the content line it stands in front of, and
+    // what follows is the original pass over the original lines.
+    let is_marker = |line: &str| line.trim_start().starts_with("<!--pdfi ");
+    let mut lines: Vec<&str> = Vec::with_capacity(raw.len());
+    let mut attached: Vec<Vec<&str>> = Vec::with_capacity(raw.len());
+    let mut pending: Vec<&str> = Vec::new();
+    for line in raw {
+        if is_marker(line) {
+            pending.push(line);
+            continue;
+        }
+        lines.push(line);
+        attached.push(std::mem::take(&mut pending));
+    }
+    // Anything left in `pending` trails the last line of the document and
+    // addresses nothing, so it is dropped with no line to go back in front of.
 
+    let mut result: Vec<&str> = Vec::new();
     for (i, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
 
@@ -384,10 +403,13 @@ fn remove_page_numbers(text: &str) -> String {
                         && lines[i + 2].trim() == "---"));
 
             if is_isolated || before_break {
+                // The marker in front of a folio addressed the folio. Keeping it
+                // would leave a highlight pointing at text nobody was shown.
                 continue;
             }
         }
 
+        result.extend(attached[i].iter().copied());
         result.push(*line);
     }
 

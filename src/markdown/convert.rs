@@ -44,6 +44,17 @@ pub(super) struct PositionedMarkdown {
     x: f32,
     markdown: String,
     chart_order: Option<ChartProseOrder>,
+    /// The strips a highlight of this block would paint, in PDF points. Empty
+    /// when the caller had no geometry to give, in which case a citation into
+    /// the block marks nothing rather than marking the wrong thing.
+    runs: Vec<[f32; 4]>,
+}
+
+impl PositionedMarkdown {
+    pub(super) fn with_runs(mut self, runs: Vec<[f32; 4]>) -> Self {
+        self.runs = runs;
+        self
+    }
 }
 
 impl PositionedMarkdown {
@@ -58,6 +69,7 @@ impl PositionedMarkdown {
             x,
             markdown,
             chart_order,
+            runs: Vec::new(),
         }
     }
 }
@@ -716,6 +728,7 @@ fn flush_page_tables_and_images(
     inserted_images: &mut HashSet<(u32, usize)>,
     output: &mut String,
     in_paragraph: &mut bool,
+    provenance: &mut Vec<(usize, u32, Vec<[f32; 4]>)>,
 ) {
     let Some(blocks) = page_blocks.get(&page) else {
         return;
@@ -733,6 +746,9 @@ fn flush_page_tables_and_images(
             *in_paragraph = false;
         }
         output.push('\n');
+        if !block.runs.is_empty() {
+            provenance.push((output.len(), page, block.runs.clone()));
+        }
         output.push_str(&block.markdown);
         output.push('\n');
         match kind {
@@ -835,6 +851,10 @@ pub(super) fn to_markdown_from_lines_with_tables_and_images(
     let overused_heading_levels = detect_overused_struct_heading_levels(&lines, struct_roles);
 
     let mut output = String::new();
+    // Where each line's contribution to `output` began, with the page and box it
+    // came from. Offsets stay meaningful only while `output` is appended to,
+    // which is why the markers are written before anything rewrites it.
+    let mut provenance: Vec<(usize, u32, Vec<[f32; 4]>)> = Vec::new();
     let mut current_page = 0u32;
     let mut prev_y = f32::MAX;
     let mut prev_x = 0.0f32;
@@ -890,6 +910,28 @@ pub(super) fn to_markdown_from_lines_with_tables_and_images(
         .collect();
 
     for (line_idx, line) in lines.iter().enumerate() {
+        // The line's extent is read here; where it lands in the output is not
+        // known yet, because a page break or a positioned table may still be
+        // flushed ahead of it below. An offset taken now would place this line
+        // before content emitted before it, and every line after a table would
+        // be gathered into the paragraph above it.
+        let pending_line = if line.items.is_empty() {
+            None
+        } else {
+            let x0 = line.items.iter().map(|i| i.x).fold(f32::MAX, f32::min);
+            let x1 = line
+                .items
+                .iter()
+                .map(|i| i.x + i.width)
+                .fold(f32::MIN, f32::max);
+            let y0 = line.items.iter().map(|i| i.y).fold(f32::MAX, f32::min);
+            let y1 = line
+                .items
+                .iter()
+                .map(|i| i.y + i.height)
+                .fold(f32::MIN, f32::max);
+            Some((line.page, [x0, y0, x1, y1]))
+        };
         // Page break
         if line.page != current_page {
             // Flush current page's remaining tables and images
@@ -905,6 +947,7 @@ pub(super) fn to_markdown_from_lines_with_tables_and_images(
                     &mut inserted_images,
                     &mut output,
                     &mut in_paragraph,
+                    &mut provenance,
                 );
                 if in_paragraph {
                     output.push_str("\n\n");
@@ -929,6 +972,7 @@ pub(super) fn to_markdown_from_lines_with_tables_and_images(
                     &mut inserted_images,
                     &mut output,
                     &mut in_paragraph,
+                    &mut provenance,
                 );
                 if in_paragraph {
                     output.push_str("\n\n");
@@ -971,6 +1015,9 @@ pub(super) fn to_markdown_from_lines_with_tables_and_images(
                         paragraph_in_wrapped_bold_run = false;
                     }
                     output.push('\n');
+                    if !block.runs.is_empty() {
+                        provenance.push((output.len(), current_page, block.runs.clone()));
+                    }
                     output.push_str(&block.markdown);
                     output.push('\n');
                     match kind {
@@ -983,6 +1030,12 @@ pub(super) fn to_markdown_from_lines_with_tables_and_images(
                     }
                 }
             }
+        }
+
+        // Everything that had to go ahead of this line has been flushed, so the
+        // output now ends where this line's own text is about to begin.
+        if let Some((page, area)) = pending_line {
+            provenance.push((output.len(), page, vec![area]));
         }
 
         // Paragraph break: large forward Y gap (normal) or large backward jump
@@ -1345,6 +1398,7 @@ pub(super) fn to_markdown_from_lines_with_tables_and_images(
         &mut inserted_images,
         &mut output,
         &mut in_paragraph,
+        &mut provenance,
     );
     for &p in &all_content_pages {
         if p <= current_page {
@@ -1357,6 +1411,7 @@ pub(super) fn to_markdown_from_lines_with_tables_and_images(
             &mut inserted_images,
             &mut output,
             &mut in_paragraph,
+            &mut provenance,
         );
     }
 
@@ -1366,6 +1421,69 @@ pub(super) fn to_markdown_from_lines_with_tables_and_images(
     }
 
     // Clean up and post-process
+    // A marker at each block start, for the caller that asked for them. A recorded offset starts a block when the
+    // output so far ends at a blank line, which is exactly how this function
+    // separates blocks — so no emission rule is restated here, and a line in the
+    // middle of a paragraph is skipped because its offset does not land on one.
+    // Where a recorded line actually begins a block, and where its marker has to
+    // go to sit in front of that block rather than at the end of the one above.
+    //
+    // An offset is taken before the separator that opens a new block, because a
+    // line does not know it starts one until the paragraph logic decides so and
+    // writes `\n\n` after this point. So a block start is an offset that already
+    // sits at a line start, or one the separator immediately follows — and in
+    // that second case the marker belongs after the separator, not before it.
+    let block_start = |at: usize| -> Option<usize> {
+        if at == 0 || output[..at].ends_with('\n') {
+            return Some(at);
+        }
+        let rest = &output[at..];
+        if rest.starts_with("\n\n") {
+            return Some(at + 2);
+        }
+        if rest.starts_with('\n') {
+            return Some(at + 1);
+        }
+        None
+    };
+    let starts: Vec<usize> = if options.emit_block_provenance {
+        (0..provenance.len())
+            .filter(|&i| block_start(provenance[i].0).is_some())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let mut insertions: Vec<(usize, String)> = Vec::new();
+    for (nth, &index) in starts.iter().enumerate() {
+        let until = starts.get(nth + 1).copied().unwrap_or(provenance.len());
+        let _ = nth;
+        let (at, page, ref first) = provenance[index];
+        // Every line of the block, kept apart rather than merged into one
+        // rectangle around them all. A merged rectangle covers the ragged ends
+        // of the lines and the white space between them, which reads as a box
+        // drawn around a region; the lines themselves, painted one strip each,
+        // read as text that has been highlighted. The claim is the words, so it
+        // is the words that are marked.
+        let mut spans = first.clone();
+        for (_, other_page, other) in &provenance[index + 1..until] {
+            if *other_page == page {
+                spans.extend_from_slice(other);
+            }
+        }
+        let runs: Vec<String> = spans
+            .iter()
+            .map(|r| format!("{:.2},{:.2},{:.2},{:.2}", r[0], r[1], r[2], r[3]))
+            .collect();
+        insertions.push((
+            block_start(at).unwrap_or(at),
+            format!("<!--pdfi p={} l={}-->\n", page, runs.join(";")),
+        ));
+    }
+    // Back to front, so an earlier offset is still valid after a later insert.
+    for (at, marker) in insertions.into_iter().rev() {
+        output.insert_str(at, &marker);
+    }
+
     clean_markdown(output, &options)
 }
 
