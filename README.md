@@ -1,3 +1,10 @@
+> **This is a fork.** It adds `MarkdownOptions::emit_block_provenance` — off by
+> default — which prefixes each Markdown block with the page and line boxes it
+> came from, so a citation can highlight the paragraph a claim was drawn from.
+> The change is on the `block-provenance` branch and is meant for upstream;
+> `didro-release` adds only the packaging this fork needs. Everything below is
+> Firecrawl's, unchanged.
+
 # pdf-inspector
 
 [![Crates.io](https://img.shields.io/crates/v/pdf-inspector.svg)](https://crates.io/crates/pdf-inspector)

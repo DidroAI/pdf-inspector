@@ -3,10 +3,10 @@ requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "pdf-inspector"
+name = "didro-pdf-inspector"
 # Keep package versions in sync with `python3 scripts/version.py <version>`.
 # CI publishes automatically when the synchronized change lands on main.
-version = "1.20.0"
+version = "1.20.0.post1"
 description = "Fast PDF inspection, classification, and text extraction with smart scanned vs text-based detection"
 readme = "docs/python.md"
 license = { text = "MIT" }
@@ -27,3 +27,7 @@ Documentation = "https://github.com/firecrawl/pdf-inspector/blob/main/docs/pytho
 
 [tool.maturin]
 features = ["python"]
+# The distribution is renamed but the module is not: every caller still
+# writes `import pdf_inspector`, and maturin would otherwise look for a
+# module named after the distribution and never find the cdylib.
+module-name = "pdf_inspector"

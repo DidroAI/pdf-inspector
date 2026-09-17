@@ -1,0 +1,97 @@
+name: Release wheel
+
+# One wheel, one runner, on a tag. Upstream builds five platforms because it
+# publishes a public package; this fork feeds two Linux containers — the agent
+# sandbox and the preview image — and a developer's Mac builds locally through
+# packages/file-processing/pdf-inspector/build.sh in the agent-platform repo.
+#
+# GitHub-hosted runners, because Actions on standard runners is free for public
+# repositories. That is most of why this fork is public.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  wheel:
+    name: manylinux x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # The option defaults off, so everything the library already promised must
+      # still hold. A failure here means the patch changed output it had no
+      # business changing, and no wheel should come out of it.
+      - name: Upstream test suite
+        run: cargo test --release --quiet
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: x86_64-unknown-linux-gnu
+          args: --release --out dist
+          manylinux: auto
+          sccache: true
+
+      # Run against the wheel itself rather than the source tree it came from.
+      - name: Verify the wheel
+        run: |
+          python -m pip install --quiet dist/*.whl
+          python - <<'CHECK'
+          import re
+          from pathlib import Path
+
+          import pdf_inspector
+
+          strip = lambda text: re.sub(r'<!--pdfi[^>]*-->\n?', '', text)
+          fixtures = sorted(Path('tests').rglob('*.pdf'))
+          assert fixtures, 'no sample PDF in the checkout to verify against'
+
+          # One page of one fixture is a known exception, recorded in the commit
+          # that added the option: a page of folio-shaped lines this library
+          # suppresses in full, which the provenance build lets part of through.
+          KNOWN = {('td9264.pdf', 9)}
+
+          addressed = checked = unexpected = 0
+          for path in fixtures:
+              try:
+                  off = pdf_inspector.extract_pages_markdown(str(path))
+                  on = pdf_inspector.extract_pages_markdown(str(path), provenance=True)
+              except Exception:
+                  continue  # a fixture that exists to be rejected is not a counter-example
+              checked += 1
+              assert not any('<!--pdfi' in p.markdown for p in off.pages), \
+                  f'provenance leaked into the default build: {path}'
+              for number, (a, b) in enumerate(zip(off.pages, on.pages), start=1):
+                  if strip(b.markdown) != a.markdown and (path.name, number) not in KNOWN:
+                      print(f'  differs: {path.name} page {number}')
+                      unexpected += 1
+              if any('<!--pdfi' in p.markdown for p in on.pages):
+                  addressed += 1
+
+          assert checked, 'every fixture was rejected; nothing was verified'
+          assert addressed, 'provenance was requested and never produced'
+          assert not unexpected, f'{unexpected} pages changed beyond the known exception'
+          print(f'verified {checked} fixtures, {addressed} carrying addresses')
+          CHECK
+
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: dist/*.whl
+          body: |
+            `pdf-inspector` with block provenance, built from this fork.
+
+            The import is unchanged (`import pdf_inspector`); the distribution is
+            `didro-pdf-inspector`, so it cannot be confused with the published one.
+
+            Ask for the addresses with
+            `pdf_inspector.extract_pages_markdown(path, provenance=True)`.
