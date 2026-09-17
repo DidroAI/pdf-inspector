@@ -869,10 +869,14 @@ impl TableDetectionOutput {
         }
     }
 
+    /// `items` is the slice this table's `item_indices` point into — the one
+    /// the detector was handed, which differs at every call site and is the
+    /// only thing that can turn an index back into a box.
     fn record(
         &mut self,
         page: u32,
         table: &crate::tables::Table,
+        items: &[TextItem],
         chart_order: Option<ChartProseOrder>,
     ) {
         self.pages_with_detected_tables.insert(page);
@@ -889,7 +893,7 @@ impl TableDetectionOutput {
                             crate::tables::table_to_markdown(table),
                             chart_order,
                         )
-                        .with_runs(table_runs(table)),
+                        .with_runs(table_runs(table, items)),
                     );
             }
             #[cfg(feature = "ocr")]
@@ -1395,36 +1399,67 @@ pub fn to_markdown(text: &str, options: MarkdownOptions) -> String {
     output
 }
 
-/// One strip per row of a table, spanning its columns.
+/// One strip per row of a table, spanning the text on that row.
 ///
 /// Highlighting a table as a single rectangle would say "somewhere in this
 /// grid"; a strip per row says which rows, which is the same promise the line
-/// strips make for prose. `rows` are y boundaries in descending order and
-/// `columns` are x boundaries, both already measured by the detector, so the
-/// strips are read off the table rather than inferred from its text.
-fn table_runs(table: &crate::tables::Table) -> Vec<[f32; 4]> {
-    let (Some(&left), Some(&right)) = (
-        table
-            .columns
-            .iter()
-            .min_by(|a, b| a.total_cmp(b)),
-        table
-            .columns
-            .iter()
-            .max_by(|a, b| a.total_cmp(b)),
-    ) else {
-        return Vec::new();
-    };
-    if right <= left || table.rows.len() < 2 {
+/// strips make for prose.
+///
+/// Built from the table's own items rather than from `rows` and `columns`,
+/// deliberately. Those two are documented as boundaries and are not: each holds
+/// one coordinate per row and per column, and which coordinate depends on which
+/// detector produced the table — a column's left text edge on the heuristic
+/// path, its centre on the rect path; a row's baseline here, a band centre
+/// there. Read as boundaries they place a strip inset by a whole column and
+/// short by a row: confidently wrong, which is worse than absent, because a
+/// reader cannot tell a misplaced highlight from a misquoted source.
+///
+/// `item_indices` names the items the detector assigned to this table, indexed
+/// into the slice it was given. Clustering those by baseline is detector-
+/// independent — it holds for paths written after this one — and it is the same
+/// construction prose already uses, so a table stops being a special case.
+fn table_runs(table: &crate::tables::Table, items: &[TextItem]) -> Vec<[f32; 4]> {
+    let mut cells: Vec<&TextItem> = table
+        .item_indices
+        .iter()
+        .filter_map(|&index| items.get(index))
+        // A run whose font carries no advance reports zero width. It marks a
+        // real position but cannot widen a strip, and letting it set an edge
+        // would end a row early.
+        .filter(|item| item.width > 0.0 && item.height > 0.0)
+        .collect();
+    if cells.is_empty() {
         return Vec::new();
     }
-    let mut bounds: Vec<f32> = table.rows.clone();
-    bounds.sort_by(|a, b| a.total_cmp(b));
-    bounds
-        .windows(2)
-        .filter(|pair| pair[1] > pair[0])
-        .map(|pair| [left, pair[0], right, pair[1]])
-        .collect()
+    // `line_y` rather than `y`: it reports the anchor baseline for a superscript
+    // rather than the raised one, so a footnote marker joins the row it belongs
+    // to instead of seeding a row of its own.
+    cells.sort_by(|a, b| b.line_y().total_cmp(&a.line_y()));
+    // Scaled to the table's own text, as the detector's own row clustering is:
+    // a fixed tolerance either merges the rows of a large-type table or splits
+    // the wrapped lines of a small-type one.
+    let mut heights: Vec<f32> = cells.iter().map(|item| item.height).collect();
+    heights.sort_by(|a, b| a.total_cmp(b));
+    let tolerance = (heights[heights.len() / 2] * 0.8).max(4.0);
+
+    let mut runs: Vec<[f32; 4]> = Vec::new();
+    let mut anchor = f32::NAN;
+    for item in cells {
+        let (x0, y0) = (item.x, item.y);
+        let (x1, y1) = (item.x + item.width, item.y + item.height);
+        if runs.is_empty() || (anchor - item.line_y()).abs() > tolerance {
+            anchor = item.line_y();
+            runs.push([x0, y0, x1, y1]);
+            continue;
+        }
+        let run = runs.last_mut().expect("just checked non-empty");
+        run[0] = run[0].min(x0);
+        run[1] = run[1].min(y0);
+        run[2] = run[2].max(x1);
+        run[3] = run[3].max(y1);
+    }
+    runs.retain(|run| run[2] > run[0] && run[3] > run[1]);
+    runs
 }
 
 /// Applies the document-wide repeated header/footer classifier to grouped lines.
@@ -1854,7 +1889,7 @@ fn convert_items_with_rects_lines_and_table_output(
                             }
                         }
                     }
-                    table_output.record(page, table, chart_prose_order);
+                    table_output.record(page, table, band_items, chart_prose_order);
                 }
             }
 
@@ -1878,7 +1913,7 @@ fn convert_items_with_rects_lines_and_table_output(
                         }
                     }
                 }
-                table_output.record(page, table, chart_prose_order);
+                table_output.record(page, table, band_items, chart_prose_order);
             }
 
             // 2. Line-based detection on unclaimed items (when rects didn't find tables)
@@ -1893,7 +1928,7 @@ fn convert_items_with_rects_lines_and_table_output(
                             }
                         }
                     }
-                    table_output.record(page, table, chart_prose_order);
+                    table_output.record(page, table, band_items, chart_prose_order);
                 }
             }
 
@@ -1929,7 +1964,7 @@ fn convert_items_with_rects_lines_and_table_output(
                                 }
                             }
                         }
-                        table_output.record(page, &table, chart_prose_order);
+                        table_output.record(page, &table, &inside_items, chart_prose_order);
                         for &band_idx in &inside_map {
                             rect_claimed.insert(band_idx);
                         }
@@ -1987,7 +2022,7 @@ fn convert_items_with_rects_lines_and_table_output(
                                 }
                             }
                         }
-                        table_output.record(page, &table, chart_prose_order);
+                        table_output.record(page, &table, subset_items, chart_prose_order);
                     }
                 };
 
@@ -2049,7 +2084,7 @@ fn convert_items_with_rects_lines_and_table_output(
                             }
                         }
                     }
-                    table_output.record(page, &table, chart_prose_order);
+                    table_output.record(page, &table, band_items, chart_prose_order);
                 }
             }
         }
@@ -2108,7 +2143,7 @@ fn convert_items_with_rects_lines_and_table_output(
                             table_items.insert(global_idx);
                         }
                     }
-                    table_output.record(page, table, chart_prose_order);
+                    table_output.record(page, table, &page_text, chart_prose_order);
                 }
             }
         }
@@ -2174,7 +2209,7 @@ fn convert_items_with_rects_lines_and_table_output(
                         }
                     }
                 }
-                table_output.record(page, table, chart_prose_order);
+                table_output.record(page, table, &chart_free, chart_prose_order);
             }
         }
     }
@@ -2474,7 +2509,7 @@ mod tests {
             vec![vec!["header a".into(), "header b".into()]],
             vec![0, 1],
         );
-        output.record(1, &incomplete, None);
+        output.record(1, &incomplete, &[], None);
         assert!(output.has_detected_tables_on_page(1));
         assert!(!output.has_tables_on_page(1));
         assert!(output.complete_tables.is_empty());
@@ -2488,7 +2523,7 @@ mod tests {
             ],
             vec![0, 1, 2, 3],
         );
-        output.record(1, &complete, None);
+        output.record(1, &complete, &[], None);
         assert!(output.has_tables_on_page(1));
         assert_eq!(output.complete_tables.len(), 1);
     }
